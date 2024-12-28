@@ -1,0 +1,4 @@
+-Q theories PangoLang
+
+theories/ir.v
+theories/const.v
