@@ -6,11 +6,15 @@ Require Export Coq.Lists.List.
 Open Scope list_scope.
 Open Scope nat_scope.
 Import ListNotations.
+Require Import Arith.
+
+Module CPS.
 
 Inductive value : Type :=
     | var (s: nat)
     | label (s: string)
-    | i64 (n : Int64.int).
+    | i64 (n : Int64.int)
+    | arg (n: nat).
 
 Inductive bop : Type :=
     | mul
@@ -34,7 +38,7 @@ Inductive efop : Type := | print.
 Inductive cexp : Type :=
     | cbop (op: bop) (lhs rhs : value) (k: cexp)
     | cuop (op: uop) (v: value) (k: cexp)
-    | capp (target: string) (args: list value)
+    | capp (target: value) (args: list value)
     (** A fixpoint consits of a list of (function name, num args, body) and a 
         continuation. *)
     | cfix (fns: list (string * nat * cexp)) (k: cexp)
@@ -84,12 +88,6 @@ Qed.
 
 End cexp_ind2.
 
-(** The trace of observable effects. *)
-Definition trace := list (efop * list value).
-
-(** A mapping from function name to definition. *)
-Definition fn_store := string -> nat * cexp.
-
 (** `replace_val name new_val val` replaces [name] with `new_val`
     in [val] if [val] is a varialble with the same name as [name]. *)
 Definition replace_val (name: nat) (new_val val: value) :=
@@ -113,7 +111,8 @@ Fixpoint substitute (name: nat) (val: value) (exp: cexp) {struct exp}: cexp :=
         (map (fun e => substitute name val e) branches)
     | ceff op args k => ceff op (map (fun e => replace_val name val e) args) 
         (substitute (S name) val k)
-    | capp target args => capp target (map (fun e => replace_val name val e) args)              
+    | capp target args => capp (replace_val name val target) 
+        (map (fun e => replace_val name val e) args)              
     | fin => fin
     end.
 
@@ -169,113 +168,107 @@ Proof.
 Qed.
 
 (** [apply_args body params args] applies [args] to the body of a fixpoint,
-    [body] where the fixpoint has [param] number of arguments. *)
+    [body] where the fixpoint has [param] number of arguments.
+    
+    Parameters are given numbers in right-to-left order so that the
+    first argument is assigned [param - 1]. *)
 Fixpoint apply_args (body: cexp) (param: nat) (args: list value) : cexp :=
     match (param, args) with
     | (S n, head_a :: tail_a) =>
-        apply_args (substitute param head_a body) n tail_a
-    | (O, head_a :: _) => substitute O head_a body
+        apply_args (substitute n head_a body) n tail_a
     | _ => body
     end.
 
-(** [append_map fns st] appends the function definitions at the given fixpoint
+(** The trace of observable effects. *)
+Definition trace := list (efop * list value).
+
+(** A mapping from function name to definition. *)
+Definition fn_store := string -> nat * cexp.
+
+Record State := { tr: trace; fstor: fn_store; }.
+
+(** [append_fns fns st] appends the function definitions at the given fixpoint
     in [fns] to [st]. *)
-Fixpoint append_map (fns: list (string * nat * cexp)) (st: fn_store) : fn_store :=
+Fixpoint append_fns (fns: list (string * nat * cexp)) (st: fn_store) : fn_store :=
     match fns with 
-    | (name, args, body) :: tl => append_map tl (fun key => 
-        if eqb key name then (args, body) else st key)
+    | (name, args, body) :: tl => append_fns tl 
+        (fun key => if eqb key name then (args, body) else st key)
     | nil => st
     end.
 
-Inductive small_step : cexp -> trace -> fn_store -> cexp -> trace -> fn_store -> Prop :=
-    | sadd: forall trace st k lhs rhs,
-        small_step (cbop add (i64 lhs) (i64 rhs) k) trace st 
-                   (substitute O (i64 (Int64.add lhs rhs)) k) trace st
-    | smul : forall trace st k lhs rhs,
-        small_step (cbop mul (i64 lhs) (i64 rhs) k) trace st
-                   (substitute O (i64 (Int64.add lhs rhs)) k) trace st
-    | ssub : forall trace st k lhs rhs,
-        small_step (cbop sub (i64 lhs) (i64 rhs) k) trace st
-                   (substitute O (i64 (Int64.sub lhs rhs)) k) trace st
-    | sdiv : forall trace st k lhs rhs, (Int64.unsigned rhs) <> 0%Z ->
-        small_step (cbop div (i64 lhs) (i64 rhs) k) trace st
-                   (substitute O (i64 (Int64.divs lhs rhs)) k) trace st
+Definition bop_eval op lhs rhs :=
+    match op with
+    | add => (Int64.add lhs rhs)
+    | sub => (Int64.sub lhs rhs)
+    | mul => (Int64.mul lhs rhs)
+    (* In this representation [x / 0] is [0] *)
+    | div => (Int64.divs lhs rhs)
+    | lte => if (Int64.cmp Cle lhs rhs) then (Int64.repr 1%Z) else (Int64.repr 0%Z)
+    | lt => if (Int64.lt lhs rhs) then (Int64.repr 1%Z) else (Int64.repr 0%Z)
+    | gte => if (Int64.cmp Cge lhs rhs) then (Int64.repr 1%Z) else (Int64.repr 0%Z)
+    | gt => if (Int64.cmp Cgt lhs rhs) then (Int64.repr 1%Z) else (Int64.repr 0%Z)
+    | eq => if (Int64.eq lhs rhs) then (Int64.repr 1%Z) else (Int64.repr 0%Z)
+    | and => (Int64.and lhs rhs)
+    | or => (Int64.or lhs rhs)
+    | xor => (Int64.xor lhs rhs)
+    end.
 
-    | slt_t : forall trace st k lhs rhs, Int64.lt lhs rhs = true ->
-        small_step (cbop lt (i64 lhs) (i64 rhs) k) trace st
-                   (substitute O (i64 (Int64.repr 1%Z)) k) trace st
-    | slt_f : forall trace st k lhs rhs, Int64.lt lhs rhs = false ->
-        small_step (cbop lt (i64 lhs) (i64 rhs) k) trace st
-                   (substitute O (i64 (Int64.repr 0%Z)) k) trace st
+Definition uop_eval op val :=
+    match op with
+    | id => val
+    | not => (Int64.not val)
+    end.
 
-    | slte_t : forall trace st k lhs rhs, Int64.cmp Cle lhs rhs = true ->
-        small_step (cbop lte (i64 lhs) (i64 rhs) k) trace st
-                   (substitute O (i64 (Int64.repr 1%Z)) k) trace st
-    | slte_f : forall trace st k lhs rhs, Int64.cmp Cle lhs rhs = false ->
-        small_step (cbop lte (i64 lhs) (i64 rhs) k) trace st
-                   (substitute O (i64 (Int64.repr 0%Z)) k) trace st
-
-    | sgt_t : forall trace st k lhs rhs, Int64.cmp Cgt lhs rhs = true ->
-        small_step (cbop gt (i64 lhs) (i64 rhs) k) trace st
-                   (substitute O (i64 (Int64.repr 1%Z)) k) trace st
-    | sgt_f : forall trace st k lhs rhs, Int64.cmp Cgt lhs rhs = false ->
-        small_step (cbop gt (i64 lhs) (i64 rhs) k) trace st
-                   (substitute O (i64 (Int64.repr 0%Z)) k) trace st
-
-    | sgte_t : forall trace st k lhs rhs, Int64.cmp Cge lhs rhs = true ->
-        small_step (cbop gte (i64 lhs) (i64 rhs) k) trace st
-                   (substitute O (i64 (Int64.repr 1%Z)) k) trace st
-    | sgte_f : forall trace st k lhs rhs, Int64.cmp Cge lhs rhs = false ->
-        small_step (cbop gte (i64 lhs) (i64 rhs) k) trace st
-                   (substitute O (i64 (Int64.repr 0%Z)) k) trace st
-
-    | seq_t : forall trace st k lhs rhs, Int64.eq lhs rhs = true ->
-        small_step (cbop eq (i64 lhs) (i64 rhs) k) trace st
-                   (substitute O (i64 (Int64.repr 1%Z)) k) trace st
-    | seq_f : forall trace st k lhs rhs, Int64.eq lhs rhs = false ->
-        small_step (cbop eq (i64 lhs) (i64 rhs) k) trace st
-                   (substitute O (i64 (Int64.repr 0%Z)) k) trace st
-
-    | sand : forall trace st k lhs rhs,
-        small_step (cbop and (i64 lhs) (i64 rhs) k) trace st
-                   (substitute O (i64 (Int64.and lhs rhs)) k) trace st
-    | sor : forall trace st k lhs rhs,
-        small_step (cbop or (i64 lhs) (i64 rhs) k) trace st
-                   (substitute O (i64 (Int64.or lhs rhs)) k) trace st
-    | sxor : forall trace st k lhs rhs,
-        small_step (cbop xor (i64 lhs) (i64 rhs) k) trace st
-                   (substitute O (i64 (Int64.xor lhs rhs)) k) trace st
-    | snot : forall trace st k v,
-        small_step (cuop not (i64 v) k) trace st
-                   (substitute O (i64 (Int64.not v)) k) trace st
-    | sid : forall trace st k v,
-        small_step (cuop id v k) trace st
-                   (substitute O v k) trace st
-
-    | sapp : forall trace st f args,
-        small_step (capp f args) trace st
-                   (let '(params, k) := st f in apply_args k params args) trace st
-    | sfix : forall trace st fns k,
-        small_step (cfix fns k) trace st k trace (append_map fns st)
-    | ssel : forall trace st cond branches,
+Inductive small_step : cexp -> State -> cexp -> State -> Prop :=
+    | sbop : forall op lhs rhs st k, op <> div \/ (Int64.unsigned rhs) <> 0%Z ->
+        small_step (cbop op (i64 lhs) (i64 rhs) k) st (substitute O (i64 (bop_eval op lhs rhs)) k) st
+    | suop : forall op val st k,
+        small_step (cuop op (i64 val) k) st (substitute O (i64 (uop_eval op val)) k) st
+    | sapp : forall st f args,
+        small_step (capp (label f) args) st
+                   (let '(params, k) := st.(fstor) f in apply_args k params args) st
+    | sfix : forall st fns k,
+        small_step (cfix fns k) st k 
+            {| tr := st.(tr); fstor := (append_fns fns st.(fstor)) |}
+    | ssel : forall st cond branches,
         Int64.lt cond (Int64.repr (Z.of_nat (length branches))) = true /\ 
         Int64.lt cond (Int64.repr 0%Z) = false ->
-        small_step (csel (i64 cond) branches) trace st 
-            (nth_default fin branches (Z.abs_nat (Int64.unsigned cond))) trace st
-    | seff : forall trace st args k,
-        small_step (ceff print args k) trace st k ((print, args) :: trace) st.
+        small_step (csel (i64 cond) branches) st 
+            (nth_default fin branches (Z.abs_nat (Int64.unsigned cond))) st
+    | seff : forall st args k,
+        small_step (ceff print args k) st k 
+            {| tr := ((print, args) :: st.(tr)); fstor := st.(fstor) |}.
 
-Inductive many_step : cexp -> trace -> fn_store -> cexp -> trace -> fn_store -> Prop :=
-    | small: forall e t s e' t' s', small_step e t s e' t' s' -> many_step e t s e' t' s'
-    | trans: forall e t s e' t' s' e'' t'' s'',
-        small_step e t s e' t' s' /\ small_step e' t' s' e'' t'' s'' ->
-        many_step e t s e'' t'' s''.
+
+Theorem determinism: forall c s c_1 s_1 c_2 s_2,
+    small_step c s c_1 s_1 /\ small_step c s c_2 s_2 ->
+    c_1 = c_2 /\ s_1 = s_2.
+Proof.
+    destruct c. all: intros; destruct H; inversion H; 
+        try (inversion H0; split; try congruence).
+    - assert (HA: label f = label f0) by congruence. inversion HA.
+      assert (HB: s_1 = s_2) by congruence. now rewrite HB.
+Qed.         
+
+
+(* Multi step relation (aka Star) *)
+Inductive multi_step : cexp -> State -> cexp -> State -> Prop :=
+    | refl: forall e s, multi_step e s e s
+    | trans: forall e s e' s' e'' s'',
+        small_step e s e' s' /\ multi_step e' s' e'' s'' ->
+        multi_step e s e'' s''.
 
 
 Example step_add: small_step 
     (cbop add (i64 (Int64.repr 1%Z)) (i64 (Int64.repr 2%Z)) 
-        (ceff print [var O] fin)) nil (fun _ => (O, fin))
-    (ceff print [i64 (Int64.repr 3%Z)] fin) nil (fun _ => (O, fin)).
-Proof. constructor. Qed.
+        (ceff print [var O] fin)) {| tr := nil; fstor := (fun _ => (O, fin)) |} 
+    (ceff print [i64 (Int64.repr 3%Z)] fin) 
+        {| tr := nil; fstor := (fun _ => (O, fin)) |}.
+Proof. constructor. left. discriminate. Qed.
+
+#[export]
+Hint Constructors small_step : core.
+
+End CPS.
 
 
