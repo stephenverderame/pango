@@ -1,8 +1,7 @@
-Require Export Coq.Strings.String.
+From Coq Require Export List FMaps String.
 Open Scope string_scope.
 Require Export compcert.lib.Integers.
 Require Export ZArith.
-Require Export Coq.Lists.List.
 Open Scope list_scope.
 Open Scope nat_scope.
 Import ListNotations.
@@ -33,6 +32,19 @@ Inductive bop : Type :=
 Inductive uop : Type := | id | not.
 
 Inductive efop : Type := | print.
+
+Module Ident_Decidable <: DecidableType with Definition t := string.
+  Definition t := string.
+  Definition eq (x y: t) := x = y.
+  Definition eq_refl := @eq_refl t.
+  Definition eq_sym := @eq_sym t.
+  Definition eq_trans := @eq_trans t.
+  Definition eq_dec := string_dec.
+End Ident_Decidable.
+
+Module FnMap := FMapWeakList.Make(Ident_Decidable).
+Module FMFact := FMapFacts.WFacts(FnMap).
+Module FMProp := FMapFacts.WProperties(FnMap).
 
 (* de Bruijn notation CPS *)
 Inductive cexp : Type :=
@@ -183,18 +195,36 @@ Fixpoint apply_args (body: cexp) (param: nat) (args: list value) : cexp :=
 Definition trace := list (efop * list value).
 
 (** A mapping from function name to definition. *)
-Definition fn_store := string -> nat * cexp.
+Definition fstore := FnMap.t (nat * cexp).
 
-Record State := { tr: trace; fstor: fn_store; }.
+Record State := { tr: trace; fstor: fstore; }.
 
 (** [append_fns fns st] appends the function definitions at the given fixpoint
     in [fns] to [st]. *)
-Fixpoint append_fns (fns: list (string * nat * cexp)) (st: fn_store) : fn_store :=
+Fixpoint append_fns (fns: list (string * nat * cexp)) (st: fstore) : fstore :=
     match fns with 
-    | (name, args, body) :: tl => append_fns tl 
-        (fun key => if eqb key name then (args, body) else st key)
+    | (name, args, body) :: tl =>  
+        FnMap.add name (args, body) (append_fns tl st)
     | nil => st
     end.
+
+Fixpoint make_map {A B} (l: list (string * A * B)) : FnMap.t (A * B) :=
+    match l with
+    | nil => FnMap.empty (A * B)
+    | (a, b, c) :: tl => FnMap.add a (b, c) (make_map tl)
+    end.
+
+Theorem append_in_fns: forall fns st f b,
+    FnMap.find f (make_map fns) = Some b ->
+    FnMap.find f (append_fns fns st) = Some b.
+Proof.
+    induction fns.
+    - intros. simpl in *. inversion H.
+    - intros. simpl. destruct a. destruct p. simpl in H.
+      destruct (String.eqb_spec f s) as [ H' | H' ].
+      + rewrite H' in *. rewrite FMFact.add_eq_o in *; trivial.
+      + rewrite FMFact.add_neq_o in *; auto.
+Qed.
 
 Definition bop_eval op lhs rhs :=
     match op with
@@ -224,17 +254,16 @@ Inductive small_step : cexp -> State -> cexp -> State -> Prop :=
         small_step (cbop op (i64 lhs) (i64 rhs) k) st (substitute O (i64 (bop_eval op lhs rhs)) k) st
     | suop : forall op val st k,
         small_step (cuop op (i64 val) k) st (substitute O (i64 (uop_eval op val)) k) st
-    | sapp : forall st f args,
+    | sapp : forall st f args f_body f_params,
+        Some (f_params, f_body) = FnMap.find f st.(fstor) ->
         small_step (capp (label f) args) st
-                   (let '(params, k) := st.(fstor) f in apply_args k params args) st
+                   (apply_args f_body f_params args) st
     | sfix : forall st fns k,
         small_step (cfix fns k) st k 
             {| tr := st.(tr); fstor := (append_fns fns st.(fstor)) |}
-    | ssel : forall st cond branches,
-        Int64.lt cond (Int64.repr (Z.of_nat (length branches))) = true /\ 
-        Int64.lt cond (Int64.repr 0%Z) = false ->
-        small_step (csel (i64 cond) branches) st 
-            (nth_default fin branches (Z.abs_nat (Int64.unsigned cond))) st
+    | ssel : forall st cond branches k,
+        Some k = nth_error branches (Z.abs_nat (Int64.unsigned cond)) ->
+        small_step (csel (i64 cond) branches) st k st
     | seff : forall st args k,
         small_step (ceff print args k) st k 
             {| tr := ((print, args) :: st.(tr)); fstor := st.(fstor) |}.
@@ -246,8 +275,8 @@ Theorem determinism: forall c s c_1 s_1 c_2 s_2,
 Proof.
     destruct c. all: intros; destruct H; inversion H; 
         try (inversion H0; split; try congruence).
-    - assert (HA: label f = label f0) by congruence. inversion HA.
-      assert (HB: s_1 = s_2) by congruence. now rewrite HB.
+    (* - assert (HA: label f = label f0) by congruence. inversion HA.
+      assert (HB: s_1 = s_2) by congruence. now rewrite HB. *)
 Qed.         
 
 
@@ -258,12 +287,18 @@ Inductive multi_step : cexp -> State -> cexp -> State -> Prop :=
         small_step e s e' s' /\ multi_step e' s' e'' s'' ->
         multi_step e s e'' s''.
 
+Declare Scope cps_scope.        
+Notation "c1 @ s1 --> c2 @ s2" := (small_step c1 s1 c2 s2) 
+    (at level 10, s1 at next level, c2 at next level, s2 at next level) : cps_scope.
+Notation "c1 @ s1 -->* c2 @ s2" := (multi_step c1 s1 c2 s2) 
+    (at level 10, s1 at next level, c2 at next level, s2 at next level) : cps_scope.
+
 
 Example step_add: small_step 
     (cbop add (i64 (Int64.repr 1%Z)) (i64 (Int64.repr 2%Z)) 
-        (ceff print [var O] fin)) {| tr := nil; fstor := (fun _ => (O, fin)) |} 
+        (ceff print [var O] fin)) {| tr := nil; fstor := FnMap.empty (nat * cexp) |} 
     (ceff print [i64 (Int64.repr 3%Z)] fin) 
-        {| tr := nil; fstor := (fun _ => (O, fin)) |}.
+        {| tr := nil; fstor := FnMap.empty (nat * cexp) |}.
 Proof. constructor. left. discriminate. Qed.
 
 #[export]
