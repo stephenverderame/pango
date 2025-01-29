@@ -1,4 +1,4 @@
-From Coq Require Export List FMaps String.
+From Coq Require Export List FMaps String FSets.
 Open Scope string_scope.
 Require Export compcert.lib.Integers.
 Require Export ZArith.
@@ -6,14 +6,14 @@ Open Scope list_scope.
 Open Scope nat_scope.
 Import ListNotations.
 Require Import Arith.
+Require Import Lia.
 
 Module CPS.
 
 Inductive value : Type :=
     | var (s: nat)
     | label (s: string)
-    | i64 (n : Int64.int)
-    | arg (n: nat).
+    | i64 (n : Int64.int).
 
 Inductive bop : Type :=
     | mul
@@ -108,6 +108,23 @@ Definition replace_val (name: nat) (new_val val: value) :=
     | x => x
     end.
 
+Lemma replace_val_id: forall n v, replace_val n v v = v.
+Proof. 
+    intros. destruct v. all: simpl; try reflexivity.
+    destruct (Nat.eqb_spec n s); try reflexivity.
+Qed.
+
+Lemma replace_val_idempotent: forall n v val, 
+    replace_val n v (replace_val n v val) = replace_val n v val.
+Proof.
+    intros. destruct val; try now simpl.
+    - destruct (Nat.eqb_spec n s).
+        + rewrite e. simpl. rewrite Nat.eqb_refl. 
+            apply replace_val_id.
+        + simpl. apply Nat.eqb_neq in n0. rewrite n0.
+            simpl. now rewrite n0.
+Qed.
+
 (** [substitute name val exp] substitues [name] for [val] in [exp]. As we use de Bruijn
     notation, [name] is incremented every time we descend pass another bind point in
     the tree. *)
@@ -127,6 +144,166 @@ Fixpoint substitute (name: nat) (val: value) (exp: cexp) {struct exp}: cexp :=
         (map (fun e => replace_val name val e) args)              
     | fin => fin
     end.
+
+Module NatSet := FSetWeakList.Make(Nat).
+Module NSFact := FSetFacts.WFacts(NatSet).
+Module NSProp := FSetProperties.WProperties(NatSet).
+Module NSDecide := FSetDecide.Decide(NatSet).
+
+Axiom functional_extensionality : forall {X Y: Type} {f g : X -> Y},
+  (forall (x: X), f x = g x) -> f = g.
+
+Axiom set_eq_extensionality : forall a b, NatSet.Equal a b <-> a = b.
+
+Definition fvs_val (v: value) (depth: nat) : NatSet.t :=
+    match v with
+    | var n => if Nat.ltb n depth then NatSet.empty else NatSet.singleton (n - depth)
+    | _ => NatSet.empty
+    end.
+
+Fixpoint fvs_rec (exp: cexp) (depth: nat) : NatSet.t :=
+    match exp with
+    | cbop _ lhs rhs k => NatSet.union (fvs_val lhs depth) (NatSet.union (fvs_val rhs depth) (fvs_rec k (S depth)))
+    | cuop _ v k => NatSet.union (fvs_val v depth) (fvs_rec k (S depth))
+    | cfix fns k => 
+        let fvs_fns := List.fold_left (fun acc e => 
+            let '(_, _, body) := e in NatSet.union acc (fvs_rec body depth)) fns NatSet.empty in
+        NatSet.union fvs_fns (fvs_rec k depth)
+    | csel cond branches => 
+        List.fold_left (fun acc e => NatSet.union acc (fvs_rec e depth)) branches (fvs_val cond depth)
+    | ceff _ args k => 
+        List.fold_left (fun acc e => NatSet.union acc (fvs_val e depth)) args (fvs_rec k (S depth))
+    | capp target args => 
+        List.fold_left (fun acc e => NatSet.union acc (fvs_val e depth)) args (fvs_val target depth)
+    | fin => NatSet.empty
+    end.
+
+Remark replace_val_invariant: forall s v v',
+    ~ NatSet.In s (fvs_val v O) -> replace_val s v' v = v.
+Proof.
+    intros s v. destruct v; try (intros; simpl; reflexivity).
+    - intros. simpl in *. rewrite Nat.sub_0_r in H.
+      assert (s <> s0). { intros H'. apply H. rewrite H'. now apply NatSet.singleton_2. }
+      destruct (Nat.eqb_spec s s0); (contradiction || trivial).
+Qed.
+
+Remark no_fvs_var_lt: forall v n, n > v -> fvs_val (var v) n = NatSet.empty.
+Proof.
+    intros. destruct v; simpl.
+    - assert (H': 0 < n) by auto with arith. apply Nat.ltb_lt in H'. now rewrite H'. 
+    - assert (H': S v < n) by auto with arith. apply Nat.ltb_lt in H'. now rewrite H'.
+Qed.
+
+Corollary replace_val_invariant2: forall s v v',
+    NatSet.mem s (fvs_val v O) = false -> replace_val s v' v = v.
+Proof.
+    intros. apply NSProp.FM.not_mem_iff in H. apply replace_val_invariant. assumption.
+Qed.
+
+Lemma in_fvs_equiv: forall k s n,
+    ~ NatSet.In s (fvs_rec k (S n)) -> ~ NatSet.In (S s) (fvs_rec k n).
+Proof.
+    intros k. induction k using cexp_ind2.
+    - simpl. intros. simpl in H. unfold "~". intros.
+      (* apply NatSet.union_3 in H0. apply NatSet.union_3. apply IHk.
+      Search NatSet.In.
+      unfold "~" in *. intros. apply H. apply NSFact.union_iff. right. 
+      apply NSFact.union_iff. now right.
+    - simpl. intros. apply NatSet.union_3. apply IHk.
+      unfold "~" in *. intros. apply H. apply NSFact.union_iff. now right.
+    - simpl. intros.  *)
+Admitted.
+
+Definition fvs k := fvs_rec k 0.
+
+Theorem subst_invariant: forall s v k, ~ NatSet.In s (fvs k) -> k = substitute s v k.
+Proof.
+    intros. generalize dependent s. generalize dependent v. induction k.
+    - intros. simpl in *. apply NSProp.FM.not_mem_iff in H. unfold fvs in H. 
+      unfold fvs_rec in H. rewrite NSProp.Dec.F.union_b in H.
+      rewrite NSProp.Dec.F.union_b in H. apply orb_false_elim in H.
+      destruct H as [H']. apply orb_false_elim in H. destruct H as [H'']. fold fvs_rec in H.
+      apply replace_val_invariant2 with (v' := v) in H'.
+      apply replace_val_invariant2 with (v' := v) in H''.
+      rewrite H'. rewrite H''. f_equal. apply IHk. apply NSProp.FM.not_mem_iff in H.
+      apply in_fvs_equiv in H. apply H.
+    - intros. simpl. apply NSProp.FM.not_mem_iff in H. unfold fvs in H. 
+      unfold fvs_rec in H. rewrite NSProp.Dec.F.union_b in H.
+      apply orb_false_elim in H.
+      destruct H as [H']. fold fvs_rec in H.
+      apply replace_val_invariant2 with (v' := v0) in H'.
+      rewrite H'. f_equal. apply IHk. apply NSProp.FM.not_mem_iff in H.
+      apply in_fvs_equiv in H. apply H.
+    - intros. simpl. f_equal.
+      + destruct target; simpl; try reflexivity.
+        destruct (Nat.eqb_spec s s0).
+        * rewrite e in H. unfold "~" in H. unfold fvs in H.
+          simpl in H. rewrite Nat.sub_0_r in H.
+          assert (H': NatSet.In s0 (fold_left (fun (acc : NatSet.t) (e : value) => 
+            NatSet.union acc (fvs_val e 0)) args (NatSet.singleton s0))).
+          { induction args.
+            - simpl. now apply NatSet.singleton_2.
+            - simpl. simpl in H. 
+        (* apply NSFact.union_3. apply IHargs. }
+        apply NSProp.FM.not_mem_iff in H. unfold fvs in H. 
+        unfold fvs_rec in H. rewrite NSProp.Dec.F.union_b in H.
+        apply orb_false_elim in H. destruct H as [H']. fold fvs_rec in H.
+        apply replace_val_invariant2 with (v' := v) in H'.
+        rewrite H'. f_equal. apply IHk. apply NSProp.FM.not_mem_iff in H.
+        apply in_fvs_equiv in H. apply H. *)
+Admitted.
+
+Theorem subst_remove_fvs: forall k k' s v, substitute s v k = k' -> ~ NatSet.In s (fvs k').
+Proof.
+    intros k. induction k using cexp_ind2.
+    -intros.
+Admitted.
+
+Lemma fvs_val_gt: forall v v' s n, 
+    n > s -> NatSet.Equal (fvs_val (replace_val s (i64 v') v) n) (fvs_val v n).
+Proof.
+    intros. destruct v; try (simpl; easy).
+    - simpl. destruct (Nat.eqb_spec s s0).
+        + assert (H0: s0 < n) by lia. apply Nat.ltb_lt in H0. rewrite H0. easy.
+        + destruct (Nat.ltb_spec s0 n).
+            * simpl. apply Nat.ltb_lt in H0. rewrite H0. easy.
+            * simpl. assert (H1: ~ s0 < n) by lia. apply Nat.ltb_nlt in H1. now rewrite H1.
+Qed.
+ 
+Lemma fold_left_map_fvs_val: forall A f (args: list A) (b: NatSet.t) n',
+    NatSet.Equal
+    (fold_left (fun acc e => NatSet.union acc (fvs_val (f e) n')) args b)
+    (fold_left (fun acc e => NatSet.union acc (fvs_val e n')) (map f args) b).
+Proof.
+    intros A f args. induction args.
+    - intros. easy.
+    - intros. simpl. apply IHargs.
+Qed.
+
+Theorem subst_fvs_gt: forall k v s n', 
+    n' > s -> NatSet.Equal (fvs_rec (substitute s (i64 v) k) n') (fvs_rec k n').
+Proof.
+    intros k. induction k using cexp_ind2.
+    - intros. simpl. pose proof H as H'. pose proof H as H''.
+      apply fvs_val_gt with (v := lhs) (v' := v) in H.
+      apply fvs_val_gt with (v := rhs) (v' := v) in H'.
+      rewrite H. rewrite H'. rewrite IHk. reflexivity. lia.
+    - intros. simpl. pose proof H as H'. apply fvs_val_gt with (v := v) (v' := v0) in H.
+      rewrite H. rewrite IHk. reflexivity. lia.
+    - intros. simpl. pose proof H as H'.
+      rewrite <- fold_left_map_fvs_val.
+      apply set_eq_extensionality.
+      f_equal.
+      + apply functional_extensionality. intros. apply functional_extensionality.
+        intros k. apply set_eq_extensionality.
+        apply fvs_val_gt with (v := k) (v' := v) in H. now rewrite H.
+      + apply set_eq_extensionality. apply fvs_val_gt with (v := target) (v' := v) in H.
+        now rewrite H. 
+    - intros. simpl. pose proof H0 as H'. admit.
+    - 
+Admitted.
+
+
 
 (** The depth of a CPS expression tree. *)
 Fixpoint depth exp: nat :=
@@ -179,16 +356,67 @@ Proof.
     - intros. simpl. reflexivity.   
 Qed.
 
+Lemma subst_idempotent: forall e v n, 
+    substitute n v (substitute n v e) = substitute n v e.
+Proof.
+    intros e. induction e using cexp_ind2.
+    - intros. simpl. rewrite IHe. rewrite replace_val_idempotent. 
+      now rewrite replace_val_idempotent.
+    - intros. simpl. rewrite IHe. now rewrite replace_val_idempotent.
+    - intros. simpl. rewrite replace_val_idempotent.
+      rewrite map_map.
+      rewrite map_ext_Forall with (g := fun x => replace_val n v x).
+      + trivial.
+      + apply Forall_forall. intros. apply replace_val_idempotent. 
+    - intros. simpl. rewrite replace_val_idempotent.
+        rewrite map_map.
+        rewrite map_ext_Forall with (g := fun x => substitute n v x).
+        + trivial.
+        + rewrite Forall_forall in H. apply Forall_forall. intros. now apply H.
+    - intros. simpl. f_equal.
+        + rewrite map_map.
+          rewrite Forall_forall in H. unfold onSnd in H.
+          apply map_ext_in.
+          intros a Hin. remember a as b. destruct b as (c & d). destruct c.
+          assert (H': substitute (n + n0) v (substitute (n + n0) v d) = substitute (n + n0) v d).
+          * specialize H with (x := a).
+            assert (H': snd a = d). { rewrite <- Heqb; now simpl. } 
+            rewrite H' in H. apply H with (n := n + n0) (v := v).
+            now rewrite <- Heqb.
+          * now rewrite H'.
+        + apply IHe.
+    - intros. simpl. rewrite map_map. rewrite IHe. f_equal.
+      rewrite map_ext_Forall with (g := fun x => replace_val n v x).
+      + reflexivity.
+      + apply Forall_forall. intros. apply replace_val_idempotent.
+    - intros. simpl. reflexivity.
+Qed.
+
+(** A well founded relation on [cexp] using [depth] *)
+Definition cexp_rel := (ltof cexp depth).
+
+Remark cexp_rel_wf: well_founded cexp_rel.
+Proof.
+    unfold cexp_rel. apply well_founded_ltof.
+Qed.
+
+Definition cexp_gt := (gtof cexp depth).
+
+Remark cexp_gt_wf: well_founded cexp_gt.
+Proof.
+    unfold cexp_gt. apply well_founded_gtof.
+Qed.
+
 (** [apply_args body params args] applies [args] to the body of a fixpoint,
     [body] where the fixpoint has [param] number of arguments.
     
     Parameters are given numbers in right-to-left order so that the
     first argument is assigned [param - 1]. *)
 Fixpoint apply_args (body: cexp) (param: nat) (args: list value) : cexp :=
-    match (param, args) with
-    | (S n, head_a :: tail_a) =>
+    match param, args with
+    | S n, head_a :: tail_a =>
         apply_args (substitute n head_a body) n tail_a
-    | _ => body
+    | _, _ => body
     end.
 
 (** The trace of observable effects. *)
@@ -275,9 +503,7 @@ Theorem determinism: forall c s c_1 s_1 c_2 s_2,
 Proof.
     destruct c. all: intros; destruct H; inversion H; 
         try (inversion H0; split; try congruence).
-    (* - assert (HA: label f = label f0) by congruence. inversion HA.
-      assert (HB: s_1 = s_2) by congruence. now rewrite HB. *)
-Qed.         
+Qed. 
 
 
 (* Multi step relation (aka Star) *)

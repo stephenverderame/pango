@@ -109,88 +109,55 @@ Proof.
     - now exists m_2.
 Qed. 
 
-
-
-(* Theorem const_fuel_lock_single: forall c c' s_1 s_2 s_1' n,
-    matches s_1 s_2 -> small_step c s_1 c' s_1' -> n > depth c ->
-    (exists c_2' s_2', small_step (const_fold_fuel c n) s_2 c_2' s_2' /\ matches s_1' s_2').
+Theorem const_fold_preserve_fvs: forall e, (fun exp =>
+    (forall n, NatSet.Equal (fvs_rec (const_fold exp) n) (fvs_rec exp n))) e.
 Proof.
-    intros. destruct H0. 
-    all: apply gt_is_succ in H1; destruct H1 as (n' & H'); rewrite H'; eexists;
-    eexists; split; (assumption || simpl; auto).
-    (* Select *)
-    - simpl. apply ssel. destruct H0. split.
-        * now rewrite map_length.
-        * assumption.
-    (* Select case 2 *)
-    - assumption.
-    (* Effect *)
-    - unfold matches. unfold matches in H. now rewrite H.
-Qed.     *)
+    apply well_founded_ind with (R := cexp_rel).
+    - apply cexp_rel_wf.
+    - intros. destruct x eqn:Hx.
+      + destruct op, lhs, rhs; autorewrite with const_fold; simpl; do 2 apply NSProp.union_equal_2;
+        try (apply H; unfold cexp_rel; unfold ltof; simpl; auto with arith). 
+        * assert (Heq: NatSet.Equal (fvs_rec c (S n)) (fvs_rec (substitute 0 (i64 (Int64.mul n0 n1)) c) (S n))).
+           { rewrite subst_fvs_gt. reflexivity. lia. }
+          rewrite Heq. apply H. unfold cexp_rel; unfold ltof.
+          rewrite <- subst_preserve_depth with (n := O) (v := i64 (Int64.mul n0 n1)).
+          auto with arith.
+Admitted.
 
-(* Lemma const_lock_single: forall c c' s_1 s_2 s_1',
-    st_matches s_1 s_2 -> tr_matches s_1 s_2 -> small_step c s_1 c' s_1' ->
-    (exists c_2' s_2', small_step (const_fold c) s_2 c_2' s_2' 
-        /\ st_matches s_1' s_2' /\ tr_matches s_1' s_2').
+Theorem const_fold_subst_idempotent: forall k v,
+    (const_fold (substitute 0 v k)) = 
+    (substitute 0 v (const_fold (substitute 0 v k))).
 Proof.
-    intros. destruct H1.
-    all: unfold st_matches in H; unfold tr_matches in H0; eexists; eexists; split; (assumption || autorewrite with const_fold; simpl; auto).
-    (* Select *)
-    - apply sapp.
-        + autorewrite with const_fold. unfold st_matches in H. unfold tr_matches in H0.
-            * now rewrite in_map_length.
-            * assumption.
-        + split.
-            * unfold st_matches. intros. specialize H with (f := f) (src_bod := src_bod) (args := args).
-                destruct H. split.
-                -- now rewrite H.
-                -- apply H0.
-            * unfold tr_matches. unfold tr_matches in H1. now rewrite H1.
-    (* Select case 2 *) 
-    - unfold matches in H. destruct H. rewrite H. unfold matches; split.
-        + destruct fns; trivial. 
-        + apply H0.
-    (* Select case 2 *)
-    - autorewrite with const_fold. apply ssel. destruct H0. split.
-        * now rewrite in_map_length.
-        * assumption.
-    (* Select case 2 *)
-    - assumption.
-    (* Effect *)
-    - unfold matches. unfold matches in H. now rewrite H.
-Qed. *)
+    intros. remember (fvs k) as nfvs eqn:Hnfvs.
+    remember (substitute 0 v k) as sk eqn:Hsk.
+    remember (fvs sk) as nfvs' eqn:Hfvs'.
+    assert (H: ~ NatSet.In 0 nfvs').
+    { rewrite Hfvs'. apply eq_sym in Hsk. now apply subst_remove_fvs in Hsk. }
+    apply subst_invariant.
+    remember (fvs (const_fold sk)) as fvsc eqn:Hfvsc.
+    apply eq_sym in Hfvsc.
+    unfold fvs in Hfvsc.
+    rewrite <- Hfvsc. unfold "~". intros.
+    apply H. rewrite Hfvs'.
+    now apply const_fold_preserve_fvs with (n := 0).
+Qed.
 
-(* I don't think this is right... *)
-(* Inductive lock_matches: cexp -> State -> cexp -> State -> Prop :=
-    | lock_matches_intro: forall c_1 s_1 c_2 s_2, 
-        matches s_1 s_2 -> 
-        c_2 = const_fold c_1 -> 
-        lock_matches c_1 s_1 c_2 s_2
-    | lock_matches_step: forall c_1 s_1 c_2 s_2 c_1' s_1' c_2' s_2', 
-        lock_matches c_1 s_1 c_2 s_2 ->
-        small_step c_1 s_1 c_1' s_1' ->
-        small_step c_2 s_2 c_2' s_2' ->
-        matches s_1' s_2' ->
-        lock_matches c_1' s_1' c_2' s_2'. *)
-
-Theorem const_fold_sub: forall op lhs rhs k,
-    const_fold (substitute O (i64 (bop_eval op lhs rhs)) k) =
-    substitute O (i64 (bop_eval op lhs rhs)) 
-        (const_fold (substitute O (i64 (bop_eval op lhs rhs)) k)).
-Proof.
-    Admitted.
-
-Theorem const_fold_app: forall f_body f_params args,
+Corollary const_fold_app: forall f_params args f_body,
     const_fold (apply_args f_body f_params args) = apply_args (const_fold f_body) f_params args.
 Proof.
-    Admitted.
+    intros n. induction n.
+    - intros args. destruct args; trivial.
+    - intros args. destruct args.
+        + now simpl.
+        + simpl. intros. rewrite IHn.
+Admitted.
 
 Inductive First {A B C} : (A * B * C) -> list (A * B * C) -> Prop :=
     | First_hd : forall x xs, First x (x :: xs)
     | First_tl : forall a1 a2 a3 b1 b2 b3 tl, a1 <> b1 -> 
         First (a1, a2, a3) tl -> First (a1, a2, a3) ((b1, b2, b3) :: tl).
 
-Lemma first_implies_in: forall A B C (e: A * B * C) l, First e l -> In e l.
+Remark first_implies_in: forall A B C (e: A * B * C) l, First e l -> In e l.
 Proof.
     intros. induction H.
     - apply in_eq.
@@ -272,6 +239,18 @@ Proof.
     - intros. now apply in_cons. 
 Qed. 
 
+Lemma in_map_nth: forall k (f: cexp -> cexp) n l,
+    Some k = nth_error l n -> Some (f k) = nth_error (in_map l (fun e _ => f e)) n.
+Proof.
+    intros k f n. induction n.
+    - intros. destruct l.
+        + discriminate.
+        + simpl. autorewrite with in_map. simpl in H. now inversion H.
+    - intros. destruct l.
+        + discriminate.
+        + simpl. autorewrite with in_map. simpl in *. now apply IHn.
+Qed.
+
 
 Theorem const_fold_step: forall c s c' s' s_2,
     c @ s --> c' @ s' -> st_matches s s_2 -> tr_matches s s_2 -> exists s'', 
@@ -279,9 +258,12 @@ Theorem const_fold_step: forall c s c' s' s_2,
 Proof.
     intros. destruct H.
     - eexists ?[s'']. split.
-        + autorewrite with const_fold. rewrite const_fold_sub at 2. now apply sbop.
+        + autorewrite with const_fold. 
+          rewrite const_fold_subst_idempotent at 2. now apply sbop.
         + split; assumption.
-    - admit. (*Same idea as prev*)
+    - eexists ?[s'']. split.
+        + autorewrite with const_fold. rewrite const_fold_subst_idempotent at 2. now apply suop.
+        + split; assumption.
     - autorewrite with const_fold. unfold st_matches in H0. unfold tr_matches in H1.
       pose proof H as H'. apply H0 in H. case H; intros. destruct H2.
       exists s_2. split. 
@@ -319,26 +301,13 @@ Proof.
                             apply H4. rewrite in_cons_neq in H6; (auto || tauto).
                 -- rewrite first_append_map_fns with (args := args) (src_bod := src_bod) by assumption. 
                     exists (const_fold src_bod). split; trivial.
-            * 
-Admitted.
-                    
-(* Theorem const_lock_simulation: forall c_1 s_1 c_1' s_1' c_2 s_2,
-    lock_matches c_1 s_1 c_2 s_2 -> small_step c_1 s_1 c_1' s_1' -> 
-    (exists c_2' s_2', small_step c_2 s_2 c_2' s_2' /\ lock_matches c_1' s_1' c_2' s_2').
-Proof.
-    intros. induction H.
-    - pose proof H0 as H'. apply const_lock_single with (s_2 := s_2) in H0; auto.
-        destruct H0 as (c_2' & s_2' & H0 & H0'). 
-        rewrite <- H1 in H0. exists c_2'. exists s_2'. split.
-        + apply H0.
-        + apply lock_matches_step with (c_1 := c_1) (s_1 := s_1) (c_2 := c_2) (s_2 := s_2); auto.
-            apply lock_matches_intro; auto.
-    - rename c_1' into c_1''. rename s_1' into s_1''. rename c_1'0 into c_1'. rename s_1'0 into s_1'.
-        Admitted.
-    (* intros. inversion H.
-    - pose proof H0 as H'. apply const_lock_single with (s_2 := s_2) in H0; auto.
-        destruct H0 as (c_2' & s_2' & H0 & H0'). 
-        rewrite <- H2 in H0. exists c_2'. exists s_2'. split.
-        + apply H0.
-        + apply lock_matches_step with (c_1 := c_1) (s_1 := s_1) (c_2 := c_2) (s_2 := s_2); auto.
-    -  *) *)
+            * unfold tr_matches in *. now simpl.
+    - eexists ?[s'']. split.
+      + autorewrite with const_fold. apply ssel. now apply in_map_nth.
+      + split; assumption.
+    - eexists ?[s'']. split.
+        + autorewrite with const_fold. apply seff.
+        + split.
+            * unfold st_matches in *. assumption.
+            * unfold tr_matches in *. simpl. now rewrite H1.
+Qed.
