@@ -8,6 +8,8 @@ Import ListNotations.
 Require Import Arith.
 Require Import Lia.
 
+From Equations Require Import Equations.
+
 Module CPS.
 
 Inductive value : Type :=
@@ -155,6 +157,18 @@ Axiom functional_extensionality : forall {X Y: Type} {f g : X -> Y},
 
 Axiom set_eq_extensionality : forall a b, NatSet.Equal a b <-> a = b.
 
+Equations in_fold_left {A B: Type} (l: list A) (f: forall (acc: B) (e: A), In e l -> B) (acc: B) : B :=
+    | hd :: tl, f, acc => in_fold_left tl (fun acc e _ => f acc e _) (f acc hd _)
+    | _, _, acc => acc.
+
+Theorem fold_left_eq_in_fold_left: forall A B (f: B -> A -> B) (l: list A) (acc: B),
+    fold_left f l acc = in_fold_left l (fun acc e _ => f acc e) acc.
+Proof.
+    intros. generalize dependent acc. induction l.
+    - intros. simpl. autorewrite with in_fold_left. reflexivity.
+    - intros. simpl. autorewrite with in_fold_left. rewrite IHl. reflexivity.
+Qed.
+
 Definition fvs_val (v: value) (depth: nat) : NatSet.t :=
     match v with
     | var n => if Nat.ltb n depth then NatSet.empty else NatSet.singleton (n - depth)
@@ -167,7 +181,7 @@ Fixpoint fvs_rec (exp: cexp) (depth: nat) : NatSet.t :=
     | cuop _ v k => NatSet.union (fvs_val v depth) (fvs_rec k (S depth))
     | cfix fns k => 
         let fvs_fns := List.fold_left (fun acc e => 
-            let '(_, _, body) := e in NatSet.union acc (fvs_rec body depth)) fns NatSet.empty in
+            let '(_, args, body) := e in NatSet.union acc (fvs_rec body (depth + args))) fns NatSet.empty in
         NatSet.union fvs_fns (fvs_rec k depth)
     | csel cond branches => 
         List.fold_left (fun acc e => NatSet.union acc (fvs_rec e depth)) branches (fvs_val cond depth)
@@ -270,14 +284,53 @@ Proof.
             * simpl. assert (H1: ~ s0 < n) by lia. apply Nat.ltb_nlt in H1. now rewrite H1.
 Qed.
  
-Lemma fold_left_map_fvs_val: forall A f (args: list A) (b: NatSet.t) n',
+Lemma fold_left_map_fvs: forall A f (g: A -> nat -> NatSet.t) (args: list A) (b: NatSet.t) n',
     NatSet.Equal
-    (fold_left (fun acc e => NatSet.union acc (fvs_val (f e) n')) args b)
-    (fold_left (fun acc e => NatSet.union acc (fvs_val e n')) (map f args) b).
+    (fold_left (fun acc e => NatSet.union acc (g (f e) n')) args b)
+    (fold_left (fun acc e => NatSet.union acc (g e n')) (map f args) b).
 Proof.
-    intros A f args. induction args.
+    intros A f g args. induction args.
     - intros. easy.
     - intros. simpl. apply IHargs.
+Qed.
+
+Lemma fold_left_map_fvs_fns: forall A (f: cexp -> nat -> NatSet.t)
+    (fns: list (A * nat * cexp)) b n' s v,
+    NatSet.Equal
+    (fold_left (fun acc '(_, args, body) => NatSet.union acc (f body (n' + args))) 
+        (map (fun '(a, args, body) => (a, args, substitute (s + args) (i64 v) body)) fns) b)
+    (fold_left (fun acc '(_, args, body) => NatSet.union acc (f (substitute (s + args) (i64 v) body) (n' + args))) fns b).
+Proof.
+    intros A f fns. induction fns.
+    - intros. easy.
+    - intros. simpl. destruct a. destruct p. apply IHfns.
+Qed.
+
+Lemma eq_fold_left: forall A f g b b' (l: list A),
+    NatSet.Equal b b' -> (forall acc acc' e, NatSet.Equal acc acc' -> NatSet.Equal (f acc e) (g acc' e)) ->
+    NatSet.Equal (fold_left f l b) (fold_left g l b').
+Proof.
+    intros A f g b b' l Heq H. generalize dependent b. generalize dependent b'. induction l.
+    - simpl. easy.
+    - intros. simpl in *. apply IHl with (b := f b a) (b' := g b' a).
+        + now apply H.
+Qed.
+
+Lemma eq_in_fold_left: forall A (l: list A) f g b b',
+    NatSet.Equal b b' -> (forall acc acc' e H, NatSet.Equal acc acc' -> NatSet.Equal (f acc e H) (g acc' e H)) ->
+    NatSet.Equal (in_fold_left l f b) (in_fold_left l g b').
+Proof.
+    intros. generalize dependent b. generalize dependent b'. induction l.
+    - simpl. easy.
+    - intros. simpl in *. autorewrite with in_fold_left. apply IHl.
+      * intros. now apply H0.
+      * now apply H0.  
+Qed.
+
+Lemma union_equal_3: forall a a' b b',
+    NatSet.Equal a a' -> NatSet.Equal b b' -> NatSet.Equal (NatSet.union a b) (NatSet.union a' b').
+Proof.
+    intros. rewrite H. rewrite H0. easy.
 Qed.
 
 Theorem subst_fvs_gt: forall k v s n', 
@@ -291,7 +344,7 @@ Proof.
     - intros. simpl. pose proof H as H'. apply fvs_val_gt with (v := v) (v' := v0) in H.
       rewrite H. rewrite IHk. reflexivity. lia.
     - intros. simpl. pose proof H as H'.
-      rewrite <- fold_left_map_fvs_val.
+      rewrite <- fold_left_map_fvs.
       apply set_eq_extensionality.
       f_equal.
       + apply functional_extensionality. intros. apply functional_extensionality.
@@ -299,9 +352,34 @@ Proof.
         apply fvs_val_gt with (v := k) (v' := v) in H. now rewrite H.
       + apply set_eq_extensionality. apply fvs_val_gt with (v := target) (v' := v) in H.
         now rewrite H. 
-    - intros. simpl. pose proof H0 as H'. admit.
-    - 
-Admitted.
+    - intros. simpl. rewrite <- fold_left_map_fvs.
+      do 2 rewrite fold_left_eq_in_fold_left.
+      apply eq_in_fold_left.
+      + now apply fvs_val_gt.
+      + intros acc acc' e Hin Hacc.
+        apply union_equal_3.
+        * assumption.
+        * induction H.
+          -- inversion Hin.
+          -- inversion Hin as [Hin' | Hin'].
+             ++ rewrite <- Hin'. now apply H.
+             ++ now apply IHForall.
+    - intros. simpl. rewrite fold_left_map_fvs_fns.
+      + apply union_equal_3.
+        * do 2 rewrite fold_left_eq_in_fold_left. apply eq_in_fold_left; try reflexivity.
+          intros acc acc' e Hin Hacc. destruct e. destruct p. apply union_equal_3; try assumption.
+          induction H.
+          -- inversion Hin.
+          -- inversion Hin as [Eqx | Hin'].
+             ++ unfold onSnd in H. rewrite Eqx in H. simpl in H. apply H. lia.
+             ++ now apply IHForall.   
+        * apply IHk. auto with arith.
+    - intros. simpl. rewrite <- fold_left_map_fvs.
+      apply eq_fold_left.
+      + apply IHk. auto with arith.
+      + intros. apply union_equal_3; auto. now apply fvs_val_gt.
+    - intros. now simpl.
+Qed.
 
 
 

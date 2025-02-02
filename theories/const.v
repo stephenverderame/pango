@@ -24,6 +24,14 @@ Proof.
     - simpl. autorewrite with in_map. simpl. rewrite IHl. trivial.
 Qed.
 
+Lemma eq_map_in_map {A B: Type} (l: list A) (f: A -> B):
+    map f l = in_map l (fun e _ => f e).
+Proof.
+    induction l.
+    - trivial.
+    - simpl. autorewrite with in_map. simpl. rewrite IHl. trivial.
+Qed.
+
 
 Lemma list_max_in: forall e l, In e l -> e <= list_max l.
 Proof.
@@ -83,31 +91,29 @@ Definition st_matches src opt := forall f src_bod args,
         opt_bod = const_fold src_bod.
                             
 
-Fixpoint const_fold_fuel (exp: cexp) (fuel: nat): cexp :=
-    match (fuel, exp) with
-    | (S n, cbop op (i64 lhs) (i64 rhs) k) =>
-        cbop op (i64 lhs) (i64 rhs) (const_fold_fuel (substitute O (i64 (bop_eval op lhs rhs)) k) n)
-    | (S n, cbop op lhs rhs k) => cbop op lhs rhs (const_fold_fuel k n)
-    | (S n, cuop op (i64 v) k) => 
-        cuop op (i64 v) (const_fold_fuel (substitute O (i64 (uop_eval op v)) k) n)
-    | (S n, cuop op b k) => cuop op b (const_fold_fuel k n)
-    | (_, capp x y) => capp x y
-    | (S n, cfix fns k) => cfix (map (fun (e: string * nat * cexp) => 
-                                      let '(a, b, k) := e in 
-                                        (a, b, const_fold_fuel k n)) fns) 
-                    (const_fold_fuel k n)
-    | (S n, csel c branches) => csel c (map (fun br => const_fold_fuel br n) branches)
-    | (S n, ceff op args k) => ceff op args (const_fold_fuel k n)
-    | (_, fin) => fin
-    | (O, x) => x
+Ltac fvs_rec_const_fold := 
+    match goal with
+    | [ H: forall y: cexp, cexp_rel y ?val -> forall n: nat, NatSet.Equal (fvs_rec (const_fold y) n) (fvs_rec y n)
+    |- NatSet.Equal (fvs_rec (const_fold (substitute O (i64 ?v) ?k)) (S ?n)) (fvs_rec ?k (S ?n))]
+        => assert (Heq: (NatSet.Equal (fvs_rec k (S n)) (fvs_rec (substitute 0 (i64 v) k) (S n))))
+           by (rewrite subst_fvs_gt; reflexivity || lia);
+           rewrite Heq; apply H; unfold cexp_rel; unfold ltof;
+           rewrite <- subst_preserve_depth;
+           auto with arith
+    | [ |- _] => idtac
     end.
 
-Lemma gt_is_succ: forall n m, n > m -> exists n', n = S n'.
+Lemma fold_left_map_fvs_fns2: forall A (f: cexp -> nat -> NatSet.t)
+    (fns: list (A * nat * cexp)) b n',
+    NatSet.Equal
+    (fold_left (fun acc '(_, args, body) => NatSet.union acc (f body (n' + args))) 
+        (map (fun '((a, args, _) as e) => (a, args, const_fold (snd e))) fns) b)
+    (fold_left (fun acc '(_, args, body) => NatSet.union acc (f (const_fold body) (n' + args))) fns b).
 Proof.
-    intros. inversion H as [ m_1 | m_2 ].
-    - now exists m.
-    - now exists m_2.
-Qed. 
+    intros A f fns. induction fns.
+    - intros. easy.
+    - intros. simpl. destruct a. destruct p. apply IHfns.
+Qed.
 
 Theorem const_fold_preserve_fvs: forall e, (fun exp =>
     (forall n, NatSet.Equal (fvs_rec (const_fold exp) n) (fvs_rec exp n))) e.
@@ -116,13 +122,41 @@ Proof.
     - apply cexp_rel_wf.
     - intros. destruct x eqn:Hx.
       + destruct op, lhs, rhs; autorewrite with const_fold; simpl; do 2 apply NSProp.union_equal_2;
-        try (apply H; unfold cexp_rel; unfold ltof; simpl; auto with arith). 
-        * assert (Heq: NatSet.Equal (fvs_rec c (S n)) (fvs_rec (substitute 0 (i64 (Int64.mul n0 n1)) c) (S n))).
-           { rewrite subst_fvs_gt. reflexivity. lia. }
-          rewrite Heq. apply H. unfold cexp_rel; unfold ltof.
-          rewrite <- subst_preserve_depth with (n := O) (v := i64 (Int64.mul n0 n1)).
-          auto with arith.
-Admitted.
+        try (apply H; unfold cexp_rel; unfold ltof; simpl; auto with arith); fvs_rec_const_fold.
+      + destruct op, v; autorewrite with const_fold; simpl; apply NSProp.union_equal_2;
+        try (apply H; unfold cexp_rel; unfold ltof; simpl; auto with arith); fvs_rec_const_fold.
+      + now autorewrite with const_fold.
+      + autorewrite with const_fold. simpl.
+        rewrite <- eq_map_in_map. apply union_equal_3.
+        * rewrite fold_left_map_fvs_fns2.
+          do 2 rewrite fold_left_eq_in_fold_left.
+          apply eq_in_fold_left; try reflexivity.
+          intros. destruct e. destruct p. apply union_equal_3.
+          -- auto.
+          -- apply H. unfold cexp_rel. unfold ltof. simpl.
+             assert (depth c0 <= list_max (map (fun '(_, _, b) => depth b) fns)).
+              { apply list_max_in. 
+                change (depth c0) with ((fun '(_, _, c0) => depth c0) (s, n0, c0)).
+                now apply List.in_map. }
+            lia.
+        * apply H. unfold cexp_rel. unfold ltof. simpl. auto with arith. 
+      + autorewrite with const_fold. simpl. 
+        rewrite <- eq_map_in_map. rewrite <- fold_left_map_fvs.
+        do 2 rewrite fold_left_eq_in_fold_left. 
+        apply eq_in_fold_left; try reflexivity. 
+        intros. apply union_equal_3.
+        * auto.
+        * apply H. unfold cexp_rel. unfold ltof. simpl.
+          assert (depth e <= list_max (map (fun e0 => depth e0) branches)).
+            { apply list_max_in. now apply List.in_map. }
+          lia.
+      + autorewrite with const_fold. simpl.
+        apply eq_fold_left.
+        * apply H. unfold cexp_rel. unfold ltof. simpl. auto with arith.
+        * intros. now apply NSProp.union_equal_1.
+      + now autorewrite with const_fold.   
+Qed.
+
 
 Theorem const_fold_subst_idempotent: forall k v,
     (const_fold (substitute 0 v k)) = 
