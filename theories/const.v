@@ -166,16 +166,17 @@ Proof.
     remember (substitute 0 v k) as sk eqn:Hsk.
     remember (fvs sk) as nfvs' eqn:Hfvs'.
     assert (H: ~ NatSet.In 0 nfvs').
-    { rewrite Hfvs'. apply eq_sym in Hsk. now apply subst_remove_fvs in Hsk. }
+    (* { rewrite Hfvs'. apply eq_sym in Hsk. now apply subst_remove_fvs in Hsk. }
     apply subst_invariant.
     remember (fvs (const_fold sk)) as fvsc eqn:Hfvsc.
     apply eq_sym in Hfvsc.
     unfold fvs in Hfvsc.
     rewrite <- Hfvsc. unfold "~". intros.
     apply H. rewrite Hfvs'.
-    now apply const_fold_preserve_fvs with (n := 0).
-Qed.
+    now apply const_fold_preserve_fvs with (n := 0). *)
+Admitted.
 
+(* This is false... *)
 Corollary const_fold_app: forall f_params args f_body,
     const_fold (apply_args f_body f_params args) = apply_args (const_fold f_body) f_params args.
 Proof.
@@ -286,6 +287,7 @@ Proof.
 Qed.
 
 
+(* So this just isn't true for app... *)
 Theorem const_fold_step: forall c s c' s' s_2,
     c @ s --> c' @ s' -> st_matches s s_2 -> tr_matches s s_2 -> exists s'', 
         (const_fold c) @ s_2 --> (const_fold c') @ s'' /\ st_matches s' s'' /\ tr_matches s' s''.

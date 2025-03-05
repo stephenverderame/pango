@@ -102,6 +102,9 @@ Qed.
 
 End cexp_ind2.
 
+Theorem ex_falso: forall P: Prop, False -> P.
+Proof. intros. contradiction. Qed.
+
 (** `replace_val name new_val val` replaces [name] with `new_val`
     in [val] if [val] is a varialble with the same name as [name]. *)
 Definition replace_val (name: nat) (new_val val: value) :=
@@ -214,6 +217,20 @@ Proof.
     intros. apply NSProp.FM.not_mem_iff in H. apply replace_val_invariant. assumption.
 Qed.
 
+Lemma in_fvs_val_equiv: forall v n,
+    NatSet.Equal (fvs_val v n) (fvs_val v (S n)).
+Proof.
+    intros. destruct v; simpl in *.
+    - destruct (Nat.ltb_spec s n).
+        + assert (H1: s < S n) by lia. rewrite <- Nat.ltb_lt in H1. 
+          now rewrite H1. 
+        + destruct (Nat.ltb_spec s n).
+            * assert (H1: s < S n) by lia. rewrite <- Nat.ltb_lt in H1. rewrite H1.
+              apply ex_falso. lia.
+            * destruct (Nat.ltb_spec n s).
+              -- assert (H3: ~ s < S n) by lia. rewrite <- Nat.ltb_nlt in H3. rewrite H3. unfold "~" in *.
+Admitted.
+
 Lemma in_fvs_equiv: forall k s n,
     ~ NatSet.In s (fvs_rec k (S n)) -> ~ NatSet.In (S s) (fvs_rec k n).
 Proof.
@@ -230,9 +247,77 @@ Admitted.
 
 Definition fvs k := fvs_rec k 0.
 
+Lemma NatSet_in_fold_left: forall T lst e b f, NatSet.In e b -> NatSet.In e 
+    (fold_left (fun (acc : NatSet.t) (e : T) => NatSet.union acc (f e)) lst b).
+Proof.
+    intros T lst. induction lst.
+    - intros. simpl. assumption.
+    - intros. simpl. apply IHlst. apply NatSet.union_2. assumption.
+Qed. 
+
+Lemma NatSet_union_fold_left: forall T lst b b' f,
+    NatSet.Equal (NatSet.union b' (fold_left (fun (acc : NatSet.t) (e : T) => 
+                    NatSet.union acc (f e)) lst b)) 
+                 (fold_left (fun (acc : NatSet.t) (e : T) => 
+                    NatSet.union acc (f e)) lst (NatSet.union b' b)).
+Proof.
+    intros T lst. induction lst.
+    - intros. simpl. reflexivity.
+    - intros. simpl.
+      assert (H: NatSet.Equal (NatSet.union (NatSet.union b' b) (f a)) (NatSet.union b' (NatSet.union b (f a))))
+        by apply NSProp.union_assoc.
+      (* functional extensionality really shouldn't be needed here, but I'm using it bc I don't
+        know why the rewrite is failing otherwise. *)
+        apply set_eq_extensionality in H. rewrite H. apply IHlst.
+Qed.
+
+Lemma fvs_val_in: forall v n s, NatSet.In s (fvs_val v n) <-> 
+    NatSet.In (s + n) (fvs_val v 0).
+Proof.
+    intros v n s. split.
+    - intros. destruct v; simpl in *.
+      + destruct (Nat.ltb_spec s0 n).
+        * inversion H.
+        * rewrite Nat.sub_0_r. apply NatSet.singleton_2.
+          apply NatSet.singleton_1 in H. lia.
+        (* * destruct (Nat.ltb_spec s0 b).
+          -- inversion H. lia. inversion H4.
+          -- inversion H; apply NatSet.singleton_2. lia. inversion H4. *)
+      + inversion H.
+      + inversion H.
+    - intros. destruct v; simpl in *.
+      + destruct (Nat.ltb_spec s0 n).
+        (* * destruct (Nat.ltb_spec s0 b).
+          -- apply NatSet.singleton_2 in H0. lia. *) 
+        * apply NatSet.singleton_1 in H. rewrite Nat.sub_0_r in H. 
+          apply ex_falso. lia.
+        * rewrite Nat.sub_0_r in H. apply NatSet.singleton_1 in H.
+          apply NatSet.singleton_2. lia.
+      + inversion H.
+      + inversion H.    
+Qed.
+
+Lemma fvs_rec_in: forall k s n b, NatSet.In s (fvs_rec k n) <-> 
+    (b < s + n /\ NatSet.In (s + n - b) (fvs_rec k b)).
+Proof.
+    split.
+    - intros H. induction k using cexp_ind2.
+      + split.
+        * intros. simpl in *. apply NSProp.FM.union_iff in H.
+      destruct H.
+Admitted.
+      (* + apply NSProp.FM.union_iff. left. now apply fvs_val_in in H.
+      + apply NSProp.FM.union_iff in H. destruct H.
+        * apply NSProp.FM.union_iff. right. apply NSProp.FM.union_iff. left.
+          now apply fvs_val_in in H.
+        * apply NSProp.FM.union_iff. right. apply NSProp.FM.union_iff. right.
+          now apply IHk in H.
+Admitted. *)
+
+
 Theorem subst_invariant: forall s v k, ~ NatSet.In s (fvs k) -> k = substitute s v k.
 Proof.
-    intros. generalize dependent s. generalize dependent v. induction k.
+    intros. generalize dependent s. generalize dependent v. induction k using cexp_ind2.
     - intros. simpl in *. apply NSProp.FM.not_mem_iff in H. unfold fvs in H. 
       unfold fvs_rec in H. rewrite NSProp.Dec.F.union_b in H.
       rewrite NSProp.Dec.F.union_b in H. apply orb_false_elim in H.
@@ -248,29 +333,78 @@ Proof.
       apply replace_val_invariant2 with (v' := v0) in H'.
       rewrite H'. f_equal. apply IHk. apply NSProp.FM.not_mem_iff in H.
       apply in_fvs_equiv in H. apply H.
-    - intros. simpl. f_equal.
+    - intros. unfold "~" in H. simpl. f_equal.
       + destruct target; simpl; try reflexivity.
         destruct (Nat.eqb_spec s s0).
-        * rewrite e in H. unfold "~" in H. unfold fvs in H.
-          simpl in H. rewrite Nat.sub_0_r in H.
-          assert (H': NatSet.In s0 (fold_left (fun (acc : NatSet.t) (e : value) => 
-            NatSet.union acc (fvs_val e 0)) args (NatSet.singleton s0))).
-          { induction args.
-            - simpl. now apply NatSet.singleton_2.
-            - simpl. simpl in H. 
-        (* apply NSFact.union_3. apply IHargs. }
-        apply NSProp.FM.not_mem_iff in H. unfold fvs in H. 
-        unfold fvs_rec in H. rewrite NSProp.Dec.F.union_b in H.
-        apply orb_false_elim in H. destruct H as [H']. fold fvs_rec in H.
-        apply replace_val_invariant2 with (v' := v) in H'.
-        rewrite H'. f_equal. apply IHk. apply NSProp.FM.not_mem_iff in H.
-        apply in_fvs_equiv in H. apply H. *)
+        * unfold fvs in H. simpl in H. rewrite Nat.sub_0_r in H.
+          apply ex_falso. apply H. apply NatSet_in_fold_left. now apply NatSet.singleton_2.
+        * reflexivity.
+      + induction args.
+        * simpl. reflexivity.
+        * simpl. f_equal.
+          -- destruct a; simpl; try reflexivity.
+             destruct (Nat.eqb_spec s s0).
+             ++ unfold fvs in H. simpl in H. rewrite Nat.sub_0_r in H.
+                apply ex_falso. apply H. apply NatSet_in_fold_left. rewrite e. 
+                apply NatSet.union_3. now apply NatSet.singleton_2.
+             ++ reflexivity.
+          -- apply IHargs. intros. apply H. unfold fvs. simpl. unfold fvs in H0. 
+             unfold fvs_rec in H0. 
+             assert (H': NatSet.union (fvs_val target 0) (fvs_val a 0) = 
+                    NatSet.union (fvs_val a 0) (fvs_val target 0)). 
+                apply set_eq_extensionality; now rewrite NSProp.union_sym.
+             rewrite H'.
+             rewrite <- NatSet_union_fold_left.
+             apply NatSet.union_3. apply H0.
+    - intros. simpl. f_equal.
+      + destruct cond; simpl; try reflexivity. destruct (Nat.eqb_spec s s0).
+        * unfold fvs in H0. simpl in H0. rewrite Nat.sub_0_r in H0.
+          apply ex_falso. apply H0. apply NatSet_in_fold_left. rewrite e. 
+          now apply NatSet.singleton_2.
+        * reflexivity.
+      + induction branches.
+        * easy.
+        * simpl. f_equal.
+          -- inversion H. apply H3. unfold fvs in H0. simpl in H0. unfold "~". intros.
+             apply H0. apply NatSet_in_fold_left. apply NatSet.union_3. auto.
+          -- apply IHbranches.
+             ++ now inversion H.
+             ++ unfold "~". intros. apply H0. unfold fvs in *. simpl.
+                assert (H': NatSet.union (fvs_val cond 0) (fvs_rec a 0) = 
+                    NatSet.union (fvs_rec a 0) (fvs_val cond 0)). 
+                apply set_eq_extensionality; now rewrite NSProp.union_sym.
+             rewrite H'.
+             rewrite <- NatSet_union_fold_left. unfold fvs_rec in H1. fold fvs_rec in H1.
+             apply NatSet.union_3. apply H1.
+    - intros. induction fns.
+      + simpl. unfold fvs in H0. simpl in H0. rewrite <- IHk. reflexivity. 
+        unfold "~". intros. apply H0. apply NatSet.union_3. auto.
+      + simpl. f_equal.
+        * f_equal.
+          -- destruct a. destruct p. inversion H. unfold onSnd in H3. simpl in H3.
+             f_equal. apply H3. unfold fvs in H0. simpl in H0.
+             unfold "~". intros. apply H0. apply NatSet.union_2.
+             assert (H': NatSet.Equal (fold_left (fun (acc : NatSet.t) '(_, args, body) =>
+                NatSet.union acc (fvs_rec body args)) fns
+                    (NatSet.union NatSet.empty (fvs_rec c n)))
+             (fold_left (fun (acc : NatSet.t) e =>
+                NatSet.union acc ((fun '(_, args, body) => fvs_rec body args) e))  fns
+                    (NatSet.union NatSet.empty (fvs_rec c n)))).
+             { simpl. apply set_eq_extensionality. f_equal. apply functional_extensionality. intros.
+               apply functional_extensionality. intros.
+               destruct x1. now destruct p. }
+             rewrite H'. apply NatSet_in_fold_left. apply NatSet.union_3.
+             apply fvs_rec_in with (b := O) in H5. 
 Admitted.
 
-Theorem subst_remove_fvs: forall k k' s v, substitute s v k = k' -> ~ NatSet.In s (fvs k').
+Theorem subst_remove_fvs: forall k k' s v, substitute s (i64 v) k = k' -> ~ NatSet.In s (fvs k').
 Proof.
     intros k. induction k using cexp_ind2.
-    -intros.
+    - intros. simpl in H. remember (fvs k') as fvk eqn: Hfvk. rewrite <- H in Hfvk. 
+      destruct lhs, rhs; simpl in H.
+      + destruct (Nat.eqb_spec s s0); destruct (Nat.eqb_spec s s1); simpl in H.
+        * rewrite <- e in Hfvk. rewrite <- e0 in Hfvk. simpl in Hfvk. rewrite Nat.eqb_refl in Hfvk.
+          unfold fvs in Hfvk. simpl in Hfvk.
 Admitted.
 
 Lemma fvs_val_gt: forall v v' s n, 
